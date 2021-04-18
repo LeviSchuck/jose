@@ -1,0 +1,6 @@
+build
+scratchpad.txt
+.vscode
+crash*.janet
+scratchfolder
+.DS_Store

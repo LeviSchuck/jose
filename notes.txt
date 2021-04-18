@@ -1,0 +1,2 @@
+https://github.com/funcool/buddy-sign/blob/master/doc/01-jwt.md
+This seems like a good API to follow.
