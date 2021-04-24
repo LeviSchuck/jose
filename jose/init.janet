@@ -21,8 +21,30 @@
 
 (use ./internal)
 
+(defn jwks/empty [] @{})
+
+(defn jwks/add [jwks key]
+  (unless key (errorf "Key cannot be nil"))
+  (def kid (get-in key [:jwk-public :kid]))
+  (unless (get-in key [:jwk-public :alg]) (errorf "Algorithm missing in key with kid %p" kid))
+  (put jwks kid key))
+
+(defn jwk/hs [key &opt kid bits]
+  (default kid :default)
+  (default bits 256)
+  (hs-key key kid bits))
+
+(defn jwk/pem [pem &opt kid usage alg]
+  (import-single-pem pem kid usage alg)
+  )
+
 (defn jwt/sign [data key]
-  (sign-hs key data))
+  (cond
+    (= :string (type key)) (sign-hs key data)
+    (and (= (key :use) :sig) (= (key :type) :hmac)) (sign-hs key data)
+    (and (= (key :use) :sig)) (sign-pk key data)
+    (error "Key not supported for signature")
+  ))
 
 (defn jwt/unsign [token key]
   (try (unsign-hs key token) ([err] nil)))
