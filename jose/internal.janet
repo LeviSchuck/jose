@@ -66,6 +66,31 @@
    "ES385" :ecdsa
    "ES512" :ecdsa})
 
+(def type-usage {
+  "sig" :sig
+  :sig :sig
+  "enc" :enc
+  :enc :enc
+})
+
+(defn- jwk-find-alg-sign [jwk]
+  (def alg (get-in jwk [:jwk-public :alg]))
+  (cond
+    alg alg
+    (= :string (type (get jwk :key))) "HS256"
+    (do
+      (def kind (get-in jwk [:key :type]))
+      (def variant (or (get-in jwk [:key :version]) (get-in jwk [:key :curve-group])))
+      (match [kind variant]
+        [:rsa :pkcs1-v1.5] "RS256"
+        [:rsa :pkcs1-v2.1] "PS256"
+        [:ecdsa :secp256r1] "ES256"
+        [:ecdsa :secp384r1] "ES384"
+        [:ecdsa :secp521r1] "ES512" # not a typo, the curve is 521
+        [t v] (errorf "The key appears to be %p %p and this is not supported" t v)
+        _ (error "This key appears to not be supported"))
+        )))
+
 (defn decode [str]
   (def [header payload signature] (string/split "." str))
   (freeze
@@ -114,16 +139,22 @@
   (string payload "." (b64-encode signature)))
 
 (defn sign-pk [key claims &opt header]
-  (def alg (md-algorithms (if header (or (header "alg") (header :alg)) "HS256")))
+  (def alg (if header (or (header "alg") (header :alg))))
+  # If not present, then detect the algorithm for the signature
+  (def alg (if alg alg (jwk-find-alg-sign key)))
+  (unless alg (error "The algorithm for this sign operation could not be determined"))
+  # TODO ensure the algorithm is consistent with the key type
+  (def digest (md-algorithms alg))
   (def header (if header
     (b64-encode (json/encode header))
     (b64-encode (json/encode {
-      :alg (get-in key [:jwk-public :alg])
+      :alg alg
       :typ "JWT"
+      :kid (get-in key [:jwt-public :kid])
     }))))
   (def payload (string header "." (b64-encode (json/encode claims))))
   (def signature (pk/sign (key :key) payload {
-    :digest alg
+    :digest digest
     :encoding :base64
     :encoding-variant :url-unpadded
     }))
@@ -141,30 +172,21 @@
   (def jwk-private (merge jwk-public {:k key}))
   {:jwk-private jwk-private
    :jwk-public jwk-public
-   :key key
+   :key (b64-encode key)
    :type :hmac
    :use :sig
    })
 
 
-(defn import-single-pem [pem &opt kid usage alg]
-  (def key (pk/import {:pem pem}))
-  (default usage :sig)
+
+(defn- import-single [key &opt kid usage alg]
+  # use (usage) is optional and may not be set. Do not default it
   (def key-type (get key :type))
   (unless key-type (error "The key type could not be determined"))
   # https://www.iana.org/assignments/jose/jose.xhtml#web-signature-encryption-algorithms
   # There's no defined mapping to bit sizes for RSA
   (def kind (key :type))
   (def variant (or (key :version) (key :curve-group)))
-  (def detected-alg
-    (match [kind variant]
-      [:rsa :pkcs1-v1.5] "RS256"
-      [:rsa :pkcs1-v2.1] "PS256"
-      [:ecdsa :secp256r1] "ES256"
-      [:ecdsa :secp384r1] "ES384"
-      [:ecdsa :secp521r1] "ES512" # not a typo, the curve is 521
-      [t v] (errorf "The key appears to be %p %p and this is not supported" t v)
-      _ (error "This key appears to not be supported")))
   (def expected-type
     (match [kind variant]
       [:rsa :pkcs1-v1.5] :rsa-pkcs1-v1.5
@@ -172,9 +194,13 @@
       [:ecdsa _] :ecdsa
       _ (error "This key appears to not be supported")
       ))
-  (default alg detected-alg)
-  (unless (get md-algorithms alg) (errorf "The algorithm %p is not supported" alg))
-  (def desired-type (get type-algorithms alg))
+
+  # The message digest match only matters if the usage is for
+  # signing.
+  (if (and (= usage :sig) alg)
+    (unless (get md-algorithms alg) (errorf "The algorithm %p is not supported" alg)))
+
+  (def desired-type (if alg (get type-algorithms alg)))
 
   (def exported-key (pk/export key))
 
@@ -184,18 +210,22 @@
              # Switch up from v1.5 to v2.1, this requires a re-import
              # This happens if PS256 is used for example.
              (pk/import (merge exported-key {:version :pkcs1-v2.1}))
+             # Leave it alone if no alg is specified which binds to a type
+             (= desired-type nil)
+             key
              # HS256 can't be used on an RSA or ECDSA key, nor an ES256 for an RSA key, etc.
              (not= expected-type desired-type)
              (errorf "The type %p cannot be used on this key which is type %p" desired-type expected-type)
              # No change, keep key as is
              key))
-  (def kty (case desired-type
+  # kty is required
+  (def kty (case (or desired-type expected-type)
              :hash "oct"
              :ecdsa "EC"
              :rsa-pkcs1-v1.5 "RSA"
              :rsa-pkcs1-v2.1 "RSA"
-             (errorf "The key type could not be determined from the desired type %p" desired-type)
-             ))
+             nil))
+  (unless kty (errorf "The key type could not be determined from the type %p" desired-type))
   (def curve (case variant
                :secp256r1 "P-256"
                :secp384r1 "P-384"
@@ -224,8 +254,6 @@
             :dp (if (exported-key :dp) (b64-encode (:to-bytes (exported-key :dp))))
             :dq (if (exported-key :dq) (b64-encode (:to-bytes (exported-key :dq))))
             :qi (if (exported-key :qi) (b64-encode (:to-bytes (exported-key :qi))))
-            :n (if (exported-key :n) (b64-encode (:to-bytes (exported-key :n))))
-            :e (if (exported-key :e) (b64-encode (:to-bytes (exported-key :e))))
            }))
   {:jwk-private jwk-private
    :jwk-public jwk-public
@@ -233,3 +261,44 @@
    :type desired-type
    :use usage
    })
+
+(defn import-single-pem [pem &opt kid usage alg]
+  (def key (pk/import {:pem pem}))
+  (freeze (import-single key kid usage alg)))
+
+(defn- component-to-bytes [jwk component] (put jwk component (base64/decode (get jwk component))))
+(defn- component-to-bignum [jwk component] (put jwk component (bignum/parse-bytes (base64/decode (get jwk component)))))
+
+(defn import-single-jwk [jwk &opt kid usage alg]
+  # Convert from a json string to a structure
+  (def jwk (if (= :string (type jwk)) (json/decode jwk) jwk))
+  (def jwk (merge jwk {:type (case (jwk "kty")
+    "RSA" :rsa
+    "EC" :ecdsa
+    )}))
+
+  (def jwk (reduce (fn [jwk component]
+    (case component
+    "d" (component-to-bignum jwk component)
+    "n" (component-to-bignum jwk component)
+    "e" (component-to-bignum jwk component)
+    "q" (component-to-bignum jwk component)
+    "p" (component-to-bignum jwk component)
+    "qi" (component-to-bignum jwk component)
+    "dp" (component-to-bignum jwk component)
+    "dq" (component-to-bignum jwk component)
+    "x" (component-to-bignum jwk component)
+    "y" (component-to-bignum jwk component)
+    "k" (component-to-bytes jwk component)
+    jwk
+    )) jwk (keys jwk)))
+  # Attempt to import it
+  (def key (pk/import jwk))
+  # Get other details in line
+  (def kid (or kid (get jwk :kid) (get jwk "kid")))
+  (def usage (or usage (get jwk :use) (get jwk "use")))
+  (def alg (or alg (get jwk :alg) (get jwk "alg")))
+  # normalize the usage type into a keyword
+  (def usage (if usage (type-usage usage)))
+
+  (freeze (import-single key kid usage alg)))

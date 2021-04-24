@@ -20,14 +20,8 @@
 #
 
 (use ./internal)
+(import json)
 
-(defn jwks/empty [] @{})
-
-(defn jwks/add [jwks key]
-  (unless key (errorf "Key cannot be nil"))
-  (def kid (get-in key [:jwk-public :kid]))
-  (unless (get-in key [:jwk-public :alg]) (errorf "Algorithm missing in key with kid %p" kid))
-  (put jwks kid key))
 
 (defn jwk/hs [key &opt kid bits]
   (default kid :default)
@@ -35,16 +29,56 @@
   (hs-key key kid bits))
 
 (defn jwk/pem [pem &opt kid usage alg]
-  (import-single-pem pem kid usage alg)
-  )
+  (import-single-pem pem kid usage alg))
+
+(defn jwk/jwk [jwk &opt kid usage alg]
+  (import-single-jwk jwk kid usage alg))
+
+# TODO JWK generate new jwk function
+
+(defn jwk/private [jwk] (get jwk :jwk-private))
+(defn jwk/public [jwk] (get jwk :jwk-public))
+
+(defn jwks/empty [] @{})
+
+(defn jwks/add [jwks key]
+  (unless key (errorf "Key cannot be nil"))
+  (def kid (get-in key [:jwk-public :kid]))
+  (put jwks kid key))
+
+(defn jwks/import [jwks input]
+  (def input (if (= :string (type input)) (json/decode input) input))
+  (def keys (get input "keys" []))
+  (def keys (map import-single-jwk keys))
+  (reduce jwks/add jwks keys))
+
+(defn jwks/export-private [jwks]
+  (def keys (map jwk/private (values jwks)))
+  @{:keys keys})
+
+(defn jwks/export-public [jwks]
+  (def keys (map jwk/public (values jwks)))
+  @{:keys keys})
+
+(defn util/to-json-string [object &opt pretty]
+  (default pretty false)
+  (if pretty (json/encode object "  " "\n")
+    (json/encode object)))
 
 (defn jwt/sign [data key]
   (cond
     (= :string (type key)) (sign-hs key data)
     (and (= (key :use) :sig) (= (key :type) :hmac)) (sign-hs key data)
     (and (= (key :use) :sig)) (sign-pk key data)
+    (and (= nil (key :use))) (sign-pk key data)
     (error "Key not supported for signature")
   ))
 
 (defn jwt/unsign [token key]
-  (try (unsign-hs key token) ([err] nil)))
+  (cond
+    (= :string (type key)) (try (unsign-hs key token) ([err] nil))
+    (and (= (key :use) :sig) (= (key :type) :hmac)) (try (unsign-hs key token) ([err] nil))
+    (and (= (key :use) :sig)) nil
+    (and (= nil (key :use))) nil
+    (error "Key not supported for signature")
+  ))
