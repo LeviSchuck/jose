@@ -20,12 +20,12 @@
 #
 
 (declare-project
-  :name "janetjose"
+  :name "jose"
   :description "JOSE (JWS, JWT) library"
   :author "Levi Schuck"
   :license "MIT"
-  :url "https://github.com/LeviSchuck/janetjose"
-  :repo "git+https://github.com:LeviSchuck/janetjose"
+  :url "https://github.com/LeviSchuck/jose"
+  :repo "git+https://github.com:LeviSchuck/jose"
   :dependencies [
     "https://github.com/pyrmont/testament"
     "https://github.com/LeviSchuck/janetls"
@@ -34,6 +34,6 @@
   )
 
 (declare-source
-  :name "janetjose"
-  :source ["janetjose"]
+  :name "jose"
+  :source ["jose"]
   )

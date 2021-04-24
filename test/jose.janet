@@ -1,5 +1,5 @@
-(use ../janetjose/internal)
-(use ../janetjose)
+(use ../jose/internal)
+(use ../jose)
 (use testament)
 
 (def testcase-secret "test-secret-here")
@@ -24,8 +24,8 @@
 
 (deftest sign-and-unsign
   (def claims {:iat (os/time) :sub "NASA"})
-  (def token (sign claims testcase-secret))
-  (is (unsign token testcase-secret))
+  (def token (jwt/sign claims testcase-secret))
+  (is (jwt/unsign token testcase-secret))
   )
 
 (run-tests!)

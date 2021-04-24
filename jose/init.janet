@@ -21,8 +21,8 @@
 
 (use ./internal)
 
-(defn sign [data key]
+(defn jwt/sign [data key]
   (sign-hs key data))
 
-(defn unsign [token key]
+(defn jwt/unsign [token key]
   (try (unsign-hs key token) ([err] nil)))
