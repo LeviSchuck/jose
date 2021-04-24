@@ -78,7 +78,16 @@
   (cond
     (= :string (type key)) (try (unsign-hs key token) ([err] nil))
     (and (= (key :use) :sig) (= (key :type) :hmac)) (try (unsign-hs key token) ([err] nil))
-    (and (= (key :use) :sig)) nil
-    (and (= nil (key :use))) nil
+    (and (= (key :use) :sig)) (try (unsign-pk key token) ([err] nil))
+    (and (= nil (key :use))) (try (unsign-pk key token) ([err] nil))
+    (error "Key not supported for signature")
+  ))
+
+(defn jwt/unsign-unsafe [token key]
+  (cond
+    (= :string (type key)) (unsign-hs key token)
+    (and (= (key :use) :sig) (= (key :type) :hmac)) (unsign-hs key token)
+    (and (= (key :use) :sig)) (unsign-pk key token)
+    (and (= nil (key :use))) (unsign-pk key token)
     (error "Key not supported for signature")
   ))

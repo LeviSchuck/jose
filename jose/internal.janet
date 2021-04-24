@@ -109,24 +109,41 @@
   (def expected (md/hmac alg shared-secret body :raw))
   (constant= signature expected))
 
+
+
+
+(defn verify-pk [jwk jwt &opt header]
+  (def {:without-signature body :signature signature} jwt)
+  (def header (or header (jwt :header)))
+  (def digest (md-algorithms (if header (or (header "alg") (header :alg)) "RS256")))
+  (def key (get jwk :key))
+  (pk/verify key body signature {
+    :digest digest
+    :encoding :base64
+    :encoding-variant :url-unpadded
+    }))
+
 (defn- b64-encode [content] (base64/encode content :url-unpadded))
 
 (def jwt-hs256-header (b64-encode (json/encode {"alg" "HS256" "typ" "JWT"})))
+
+(defn- check-claims [claims now]
+  (if (claims "exp")
+    (when (>= now (claims "exp")) (error "Expired")))
+  (if (claims "nbf")
+    (when (< now (claims "nbf")) (error "Not Before")))
+  )
 
 (defn unsign-hs [shared-secret jwt]
   (def jwt (decode jwt))
   (def header (jwt :header))
   (unless (= (header "typ") "JWT") (error "Not a JWT"))
   (if (header "alg")
-    (unless (md-algorithms (header "alg")) (error "Not an HMAC JWT")))
+    (unless (md-algorithms (header "alg")) (error "Not a JWT or JWS")))
   (unless (verify-hs shared-secret jwt header) (error "Invalid Signature")) 
   (def claims (jwt :payload))
   # Janet os/time seems to be UTC epoch seconds
-  (def time (os/time))
-  (if (claims "exp")
-    (when (>= time (claims "exp")) (error "Expired")))
-  (if (claims "nbf")
-    (when (< time (claims "nbf")) (error "Not Before")))
+  (check-claims claims (os/time))
   claims)
 
 (defn sign-hs [shared-secret claims &opt header]
@@ -159,6 +176,18 @@
     :encoding-variant :url-unpadded
     }))
   (string payload "." signature))
+
+(defn unsign-pk [jwk jwt]
+  (def jwt (decode jwt))
+  (def header (jwt :header))
+  (unless (= (header "typ") "JWT") (error "Not a JWT"))
+  (if (header "alg")
+    (unless (md-algorithms (header "alg")) (error "Not a JWT or JWS")))
+  (unless (verify-pk jwk jwt header) (error "Invalid Signature"))
+  (def claims (jwt :payload))
+  # Janet os/time seems to be UTC epoch seconds
+  (check-claims claims (os/time))
+  claims)
 
 (defn hs-key [key kid bits]
   (unless (or (= 256 bits) (= 384 bits) (= 512 bits))
