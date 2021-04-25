@@ -66,6 +66,16 @@
    "ES385" :ecdsa
    "ES512" :ecdsa})
 
+(def rsa-version
+  {
+   "RS256" :pkcs1-v1.5
+   "RS385" :pkcs1-v1.5
+   "RS512" :pkcs1-v1.5
+   "PS256" :pkcs1-v2.1
+   "PS385" :pkcs1-v2.1
+   "PS512" :pkcs1-v2.1
+   })
+
 (def type-usage {
   "sig" :sig
   :sig :sig
@@ -165,9 +175,15 @@
 (defn verify-pk [jwk jwt &opt header]
   (def {:without-signature body :signature signature} jwt)
   (def header (or header (jwt :header)))
-  (def digest (md-algorithms (if header (or (header "alg") (header :alg)) "RS256")))
-  (def key (get jwk :key))
-  (pk/verify key body signature {
+  (def alg (or (header "alg") (header :alg) "RS256"))
+  (def digest (md-algorithms (if header alg)))
+  (def sign-key (case (rsa-version alg)
+    :pkcs1-v2.1 (jwk :key-pss)
+    :pkcs1-v1.5 (jwk :key)
+    (jwk :key)
+    ))
+
+  (pk/verify sign-key body signature {
     :digest digest
     :encoding :base64
     :encoding-variant :url-unpadded
@@ -220,7 +236,13 @@
       :kid (get-in key [:jwt-public :kid])
     }))))
   (def payload (string header "." (b64-encode (json/encode claims))))
-  (def signature (pk/sign (key :key) payload {
+  # TODO verify selected alg against alg in JWK
+  (def sign-key (case (rsa-version alg)
+    :pkcs1-v2.1 (key :key-pss)
+    :pkcs1-v1.5 (key :key)
+    (key :key)
+    ))
+  (def signature (pk/sign sign-key payload {
     :digest digest
     :encoding :base64
     :encoding-variant :url-unpadded
@@ -283,10 +305,6 @@
 
   # Ensure the algorithms line up, reconfigure if necessary
   (def key (cond
-             (and (= :rsa-pkcs1-v1.5 expected-type) (= :rsa-pkcs1-v2.1 desired-type))
-             # Switch up from v1.5 to v2.1, this requires a re-import
-             # This happens if PS256 is used for example.
-             (pk/import (merge exported-key {:version :pkcs1-v2.1}))
              # Leave it alone if no alg is specified which binds to a type
              (= desired-type nil)
              key
@@ -295,6 +313,13 @@
              (errorf "The type %p cannot be used on this key which is type %p" desired-type expected-type)
              # No change, keep key as is
              key))
+
+  # Used for PS{256,384,512}
+  (def key-pss (if
+    (= :rsa-pkcs1-v1.5 expected-type)
+    (pk/import (merge exported-key {:version :pkcs1-v2.1}))
+    ))
+
   # kty is required
   (def kty (case (or desired-type expected-type)
              :hash "oct"
@@ -338,6 +363,8 @@
   (add-fingerprint @{:jwk-private jwk-private
    :jwk-public jwk-public
    :key key
+   # key-pss will be nil for ECDSA
+   :key-pss key-pss
    :type (or desired-type expected-type)
    :use usage
    }))
