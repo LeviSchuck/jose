@@ -1,4 +1,6 @@
 (use ../jose/internal)
+(use ../jose/jwt)
+(use ../jose/hmac)
 (use ../jose)
 (use testament)
 

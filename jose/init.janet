@@ -19,22 +19,42 @@
 # SOFTWARE.
 #
 
-(use ./internal)
+(import ./internal :prefix "")
+(import ./hmac :as hmac)
+(import ./internal-key :as internal-key)
+(import ./jwk :as jwk)
+(import ./jwks :as jwks)
+(import ./jwt :as jwt)
+(import ./pk :as pk)
+
+(use janetls)
 (import json)
 
 
 (defn jwk/hs [key &opt kid bits]
-  (default kid :default)
   (default bits 256)
-  (hs-key key kid bits))
+  (internal-key/hs-key key kid bits))
+
+(defn jwk/generate-hs [&opt bits kid]
+  (default bits 256)
+  (internal-key/hs-key (util/random 64) kid bits))
 
 (defn jwk/pem [pem &opt kid usage alg]
-  (import-single-pem pem kid usage alg))
+  (pk/import-single-pem pem kid usage alg))
 
 (defn jwk/jwk [jwk &opt kid usage alg]
-  (import-single-jwk jwk kid usage alg))
+  (jwk/import-single-jwk jwk kid usage alg))
 
-# TODO JWK generate new jwk function
+(defn jwk/generate-rsa [&opt bits kid usage alg]
+  (default bits 2048)
+  (def rsa (pk/generate :rsa bits))
+  (internal-key/import-components (pk/export rsa) kid usage alg))
+
+(defn jwk/generate-ecdsa [&opt curve kid usage alg]
+  (default curve :secp256r1)
+  # TODO convert P-256 to :secp256r1, etc.
+  (def ecdsa (pk/generate :ecdsa curve))
+  (internal-key/import-components (pk/export ecdsa) kid usage alg))
 
 (defn jwk/private [jwk] (get jwk :jwk-private))
 (defn jwk/public [jwk] (get jwk :jwk-public))
@@ -44,12 +64,13 @@
 (defn jwks/add [jwks key]
   (unless key (errorf "Key cannot be nil"))
   (def kid (get-in key [:jwk-public :kid]))
+  # TODO fingerprint key
   (put jwks kid key))
 
 (defn jwks/import [jwks input]
-  (def input (if (= :string (type input)) (json/decode input) input))
-  (def keys (get input "keys" []))
-  (def keys (map import-single-jwk keys))
+  (def input (if (bytes? input) (json/decode input) input))
+  (def keys (or (get input "keys") (get input :keys) []))
+  (def keys (filter |(not (nil? $)) (map jwk/import-single-jwk keys)))
   (reduce jwks/add jwks keys))
 
 (defn jwks/export-private [jwks]
@@ -67,29 +88,25 @@
 
 (defn jwt/sign [data key]
   (cond
-    (= :string (type key)) (sign-hs key data)
-    (and (= (key :use) :sig) (= (key :type) :hmac)) (sign-hs key data)
-    (and (= (key :use) :sig)) (sign-pk key data)
-    (and (= nil (key :use))) (sign-pk key data)
+    (= :string (type key)) (hmac/sign-hs key data)
+    (and (= (key :use) :sig) (= (key :type) :hmac)) (hmac/sign-hs (key :key) data)
+    (and (= (key :use) :sig)) (pk/sign-pk key data)
+    (and (= nil (key :use))) (pk/sign-pk key data)
     (error "Key not supported for signature")
   ))
 
 (defn jwt/unsign [token key]
   (cond
-    (= :string (type key)) (try (unsign-hs key token) ([err] nil))
-    (and (= (key :use) :sig) (= (key :type) :hmac)) (try (unsign-hs (key :key) token) ([err] nil))
-    (and (= (key :use) :sig)) (try (unsign-pk key token) ([err] nil))
-    (and (= nil (key :use))) (try (unsign-pk key token) ([err] nil))
-    (key :keys) nil # This is a JWK TODO
+    (= :string (type key)) (try (hmac/unsign-hs key token) ([_] nil))
+    (and (dictionary? key) (key :type)) (try (jwk/unsign-jwk key token) ([_] nil))
+    (dictionary? key) (try (jwks/unsign-jwks key token) ([_] nil))
     (error "Key not supported for signature")
   ))
 
 (defn jwt/unsign-unsafe [token key]
   (cond
-    (= :string (type key)) (unsign-hs key token)
-    (and (= (key :use) :sig) (= (key :type) :hmac)) (unsign-hs (key :key) token)
-    (and (= (key :use) :sig)) (unsign-pk key token)
-    (key :keys) nil # This is a JWK TODO
-    (and (= nil (key :use))) (unsign-pk key token)
+    (= :string (type key)) (hmac/unsign-hs key token)
+    (and (dictionary? key) (key :type)) (jwk/unsign-jwk key token)
+    (dictionary? key) (jwks/unsign-jwks key token)
     (error "Key not supported for signature")
   ))
