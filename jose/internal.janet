@@ -73,6 +73,60 @@
   :enc :enc
 })
 
+# https://tools.ietf.org/html/rfc7638
+(defn- jwk-fingerprint-sym [jwk]
+  (def buf (buffer))
+  (buffer/push-string buf "{\"k\":")
+  (json/encode (get-in jwk [:jwk-public :k]) buf)
+  (buffer/push-string buf ",\"kty\":")
+  (json/encode (get-in jwk [:jwk-public :kty]) buf)
+  (buffer/push-string buf "}")
+  (md/digest :sha256 buf :base64 :url-unpadded))
+
+(defn- jwk-fingerprint-rsa [jwk]
+  (def buf (buffer))
+  (buffer/push-string buf "{\"e\":")
+  (json/encode (get-in jwk [:jwk-public :e]) buf)
+  (buffer/push-string buf ",\"kty\":")
+  (json/encode (get-in jwk [:jwk-public :kty]) buf)
+  (buffer/push-string buf ",\"n\":")
+  (json/encode (get-in jwk [:jwk-public :n]) buf)
+  (buffer/push-string buf "}")
+  (md/digest :sha256 buf :base64 :url-unpadded))
+
+(defn- jwk-fingerprint-ecdsa [jwk]
+  (def buf (buffer))
+  (buffer/push-string buf "{\"crv\":")
+  (json/encode (get-in jwk [:jwk-public :e]) buf)
+  (buffer/push-string buf ",\"kty\":")
+  (json/encode (get-in jwk [:jwk-public :kty]) buf)
+  (buffer/push-string buf ",\"x\":")
+  (json/encode (get-in jwk [:jwk-public :x]) buf)
+  (buffer/push-string buf ",\"y\":")
+  (json/encode (get-in jwk [:jwk-public :y]) buf)
+  (buffer/push-string buf "}")
+  (md/digest :sha256 buf :base64 :url-unpadded))
+
+(defn jwk-fingerprint [jwk]
+  (def kind (jwk :type))
+  (cond
+    (= :hmac kind) (jwk-fingerprint-sym jwk)
+    (or (= :rsa-pkcs1-v1.5 kind) (= :rsa-pkcs1-v2.1 kind)) (jwk-fingerprint-rsa jwk)
+    (= :ecdsa kind) (jwk-fingerprint-ecdsa jwk)
+    (errorf "Cannot fingerprint key, the type %p appears unsupported" kind)
+  ))
+
+(defn add-fingerprint [jwk]
+  (if (get-in jwk [:jwk-public :kid])
+    # Has a kid, no need to add fingerprint
+    jwk
+    # No finger print found, determine one.
+    (do
+      (def fingerprint (jwk-fingerprint jwk))
+      (put-in jwk [:jwk-public :kid] fingerprint)
+      (put-in jwk [:jwk-private :kid] fingerprint))
+    ))
+
 (defn- jwk-find-alg-sign [jwk]
   (def alg (get-in jwk [:jwk-public :alg]))
   (cond
@@ -100,7 +154,6 @@
     :signature signature
     }))
 
-
 (defn verify-hs [shared-secret jwt &opt header]
   (def {:without-signature body :signature signature} jwt)
   (def header (or header (jwt :header)))
@@ -108,9 +161,6 @@
   (def signature (base64/decode signature))
   (def expected (md/hmac alg shared-secret body :raw))
   (constant= signature expected))
-
-
-
 
 (defn verify-pk [jwk jwt &opt header]
   (def {:without-signature body :signature signature} jwt)
@@ -129,7 +179,7 @@
 
 (defn- check-claims [claims now]
   (if (claims "exp")
-    (when (>= now (claims "exp")) (error "Expired")))
+    (when (>= now (claims "exp")) (errorf "Expired %d seconds ago" (- now (claims "exp")))))
   (if (claims "nbf")
     (when (< now (claims "nbf")) (error "Not Before")))
   )
@@ -193,20 +243,18 @@
   (unless (or (= 256 bits) (= 384 bits) (= 512 bits))
     (error "HMAC bits must be 256 or 384 or 512"))
   (def jwk-public
-    {:kid kid
+    @{:kid kid
      :kty :oct
      :use :sig
      :alg (string "HS" bits)
      })
   (def jwk-private (merge jwk-public {:k key}))
-  {:jwk-private jwk-private
+  (add-fingerprint @{:jwk-private jwk-private
    :jwk-public jwk-public
    :key (b64-encode key)
    :type :hmac
    :use :sig
-   })
-
-
+   }))
 
 (defn- import-single [key &opt kid usage alg]
   # use (usage) is optional and may not be set. Do not default it
@@ -262,7 +310,7 @@
                nil
                ))
   (def jwk-public
-    {:kid kid
+    @{:kid kid
      :kty kty
      :use usage
      :alg alg
@@ -274,22 +322,25 @@
      })
   (def jwk-private
     (merge jwk-public
-           {:d (if (exported-key :d) (b64-encode (if
-            (= :janetls/bignum (type (exported-key :d)))
-            (b64-encode (:to-bytes (exported-key :d)))
-            (b64-encode (exported-key :p)))))
-            :p (if (exported-key :p) (b64-encode (:to-bytes (exported-key :p))))
+           @{:d (if (exported-key :d) (b64-encode (if
+              (= :janetls/bignum (type (exported-key :d)))
+              (b64-encode (:to-bytes (exported-key :d)))
+              (b64-encode (exported-key :d)))))
+            :p (if (exported-key :p) (b64-encode (if
+              (= :janetls/bignum (type (exported-key :p)))
+              (b64-encode (:to-bytes (exported-key :p)))
+              (b64-encode (exported-key :p)))))
             :q (if (exported-key :q) (b64-encode (:to-bytes (exported-key :q))))
             :dp (if (exported-key :dp) (b64-encode (:to-bytes (exported-key :dp))))
             :dq (if (exported-key :dq) (b64-encode (:to-bytes (exported-key :dq))))
             :qi (if (exported-key :qi) (b64-encode (:to-bytes (exported-key :qi))))
            }))
-  {:jwk-private jwk-private
+  (add-fingerprint @{:jwk-private jwk-private
    :jwk-public jwk-public
    :key key
-   :type desired-type
+   :type (or desired-type expected-type)
    :use usage
-   })
+   }))
 
 (defn import-single-pem [pem &opt kid usage alg]
   (def key (pk/import {:pem pem}))
@@ -302,13 +353,27 @@
   # Convert from a json string to a structure
   (def jwk (if (= :string (type jwk)) (json/decode jwk) jwk))
   (def jwk (merge jwk {:type (case (jwk "kty")
+    # Add :type attribute for use with janetls
     "RSA" :rsa
     "EC" :ecdsa
     )}))
+  (def jwk (if (= (jwk :type) :ecdsa)
+    # janetls needs the :curve-group attribute filled
+    (merge jwk {:curve-group (case (or (jwk :crv) (jwk "crv"))
+      "P-256" :secp256r1
+      "P-384" :secp384r1
+      "P-521" :secp521r1
+      (errorf "Could not classify ECDSA key, the crv attribute seems to be missing or unsupported: %p" (or (jwk :crv) (jwk "crv")))
+    )})
+    # No modification for curve group
+    jwk
+    ))
 
   (def jwk (reduce (fn [jwk component]
     (case component
-    "d" (component-to-bignum jwk component)
+    "d" (if (= (jwk :type) :rsa)
+      (component-to-bignum jwk component)
+      (component-to-bytes jwk component))
     "n" (component-to-bignum jwk component)
     "e" (component-to-bignum jwk component)
     "q" (component-to-bignum jwk component)
