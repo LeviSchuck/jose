@@ -29,7 +29,7 @@
   :dependencies [
     "https://github.com/pyrmont/testament"
     "https://github.com/LeviSchuck/janetls"
-    "https://github.com/janet/json"
+    "https://github.com/janet-lang/json"
     ]
   )
 
